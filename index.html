@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>真紅請假紀錄 - 簡潔紀錄版</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <!-- Firebase SDK -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getFirestore, doc, setDoc, onSnapshot, collection, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+
+        // Firebase Configuration
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'leave-tracker-default';
+
+        // State
+        let leaveData = {};
+        let user = null;
+        let currentDate = new Date();
+        let chartInstance = null;
+
+        const showToast = (msg) => {
+            const toast = document.getElementById('toast');
+            toast.innerText = msg;
+            toast.classList.remove('translate-y-20', 'opacity-0');
+            setTimeout(() => toast.classList.add('translate-y-20', 'opacity-0'), 2000);
+        };
+
+        const initAuth = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Auth failed", error);
+            }
+        };
+
+        onAuthStateChanged(auth, (u) => {
+            user = u;
+            if (user) {
+                document.getElementById('userIdDisplay').innerText = `連線 ID: ${user.uid.substring(0, 8)}... (雲端同步中)`;
+                setupRealtimeSync();
+            }
+        });
+
+        const setupRealtimeSync = () => {
+            if (!user) return;
+            const dataDoc = doc(db, 'artifacts', appId, 'public', 'data', 'leaveRecords', 'main');
+            onSnapshot(dataDoc, (snapshot) => {
+                leaveData = snapshot.exists() ? snapshot.data().records || {} : {};
+                renderAll();
+            }, (error) => {
+                console.error("Sync error:", error);
+                renderAll();
+            });
+        };
+
+        const saveToCloud = async (newRecords) => {
+            if (!user) return;
+            try {
+                const dataDoc = doc(db, 'artifacts', appId, 'public', 'data', 'leaveRecords', 'main');
+                await setDoc(dataDoc, { records: newRecords });
+            } catch (error) {
+                console.error("Save failed:", error);
+                showToast("雲端儲存失敗");
+            }
+        };
+
+        function renderAll() {
+            renderCalendar();
+            updateDashboard();
+            updateReasonList();
+            renderReasonRanking();
+            updateDetailedStats();
+        }
+
+        window.renderCalendar = function() {
+            const daysContainer = document.getElementById('calendarDays');
+            const monthLabel = document.getElementById('currentMonthYear');
+            daysContainer.innerHTML = '';
+            const year = currentDate.getFullYear();
+            const month = currentDate.getMonth();
+            monthLabel.innerText = `${year}年 ${month + 1}月`;
+            const firstDay = new Date(year, month, 1).getDay();
+            const lastDay = new Date(year, month + 1, 0).getDate();
+
+            for (let i = 0; i < firstDay; i++) {
+                const empty = document.createElement('div');
+                empty.className = 'aspect-square';
+                daysContainer.appendChild(empty);
+            }
+
+            for (let d = 1; d <= lastDay; d++) {
+                const dateStr = `${year}-${String(month + 1).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+                const dayEl = document.createElement('div');
+                dayEl.className = 'aspect-square flex flex-col items-center justify-center rounded-xl border border-slate-100 cursor-pointer hover:bg-slate-50 transition-all relative text-sm font-medium';
+                dayEl.innerHTML = `<span>${d}</span>`;
+
+                const entry = leaveData[dateStr];
+                if (entry) {
+                    if (entry.status === 'am') dayEl.classList.add('leave-am');
+                    else if (entry.status === 'pm') dayEl.classList.add('leave-pm');
+                    else if (entry.status === 'full') dayEl.classList.add('leave-full');
+                    if (entry.reason) {
+                        const dot = document.createElement('div');
+                        dot.className = 'absolute bottom-1 w-1.5 h-1.5 bg-red-400 rounded-full';
+                        dayEl.appendChild(dot);
+                    }
+                }
+                dayEl.onclick = () => openModal(dateStr);
+                daysContainer.appendChild(dayEl);
+            }
+        }
+
+        function updateDashboard() {
+            let totalUsed = 0;
+            Object.values(leaveData).forEach(e => totalUsed += (e.status === 'full' ? 1 : 0.5));
+            
+            // 固定參考上限（僅用於顯示進度條百分比，不再顯示於右上角）
+            const referenceLimit = 30; 
+            document.getElementById('totalUsed').innerText = totalUsed;
+            
+            const usage = (totalUsed / referenceLimit) * 100;
+            document.getElementById('usageBar').style.width = `${Math.min(100, usage)}%`;
+            document.getElementById('usageText').innerText = `${Math.round(usage)}%`;
+            document.getElementById('usageBar').className = usage > 90 ? 'bg-red-600 h-full' : 'bg-red-400 h-full';
+        }
+
+        function updateDetailedStats() {
+            let stats = { full: 0, am: 0, pm: 0 };
+            let thisMonthCount = 0;
+            const now = new Date();
+            const monthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+
+            Object.entries(leaveData).forEach(([date, entry]) => {
+                if (entry.status === 'full') stats.full++;
+                else if (entry.status === 'am') stats.am++;
+                else if (entry.status === 'pm') stats.pm++;
+                
+                if (date.startsWith(monthPrefix)) {
+                    thisMonthCount += (entry.status === 'full' ? 1 : 0.5);
+                }
+            });
+
+            document.getElementById('statFull').innerText = stats.full;
+            document.getElementById('statHalf').innerText = stats.am + stats.pm;
+            document.getElementById('statThisMonth').innerText = thisMonthCount;
+
+            const ctx = document.getElementById('leaveChart').getContext('2d');
+            if (chartInstance) chartInstance.destroy();
+            chartInstance = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['全天', '上午', '下午'],
+                    datasets: [{
+                        data: [stats.full, stats.am, stats.pm],
+                        backgroundColor: ['#ef4444', '#fee2e2', '#fecaca'],
+                        borderWidth: 0
+                    }]
+                },
+                options: { cutout: '70%', plugins: { legend: { display: false } } }
+            });
+        }
+
+        function updateReasonList() {
+            const container = document.getElementById('recentReasons');
+            const dates = Object.keys(leaveData).filter(d => leaveData[d].reason).sort((a,b) => new Date(b) - new Date(a)).slice(0,5);
+            if (!dates.length) { container.innerHTML = '<p class="text-xs text-slate-400 italic text-center py-4">目前尚無備註</p>'; return; }
+            container.innerHTML = dates.map(d => `
+                <div class="p-3 bg-red-50 rounded-lg border-l-4 border-red-400 transition hover:scale-[1.02]">
+                    <p class="text-[10px] font-bold text-red-400">${d}</p>
+                    <p class="text-sm text-slate-700">${leaveData[d].reason}</p>
+                </div>
+            `).join('');
+        }
+
+        function renderReasonRanking() {
+            const container = document.getElementById('reasonRanking');
+            const counts = {};
+            Object.values(leaveData).forEach(e => { if(e.reason) counts[e.reason] = (counts[e.reason]||0)+1; });
+            const sorted = Object.entries(counts).sort((a,b) => b[1]-a[1]).slice(0,5);
+            if (!sorted.length) { container.innerHTML = '<p class="text-xs text-slate-400 italic text-center py-4">無統計數據</p>'; return; }
+            container.innerHTML = sorted.map(([r, c]) => `
+                <div class="mb-3">
+                    <div class="flex justify-between text-xs mb-1 text-slate-600"><span>${r}</span><b>${c}次</b></div>
+                    <div class="w-full bg-slate-100 h-1.5 rounded-full"><div class="bg-red-400 h-full transition-all duration-500" style="width:${(c/Object.keys(leaveData).length)*100}%"></div></div>
+                </div>
+            `).join('');
+        }
+
+        let activeDate = null;
+        let activeStatus = '';
+
+        window.openModal = (dateStr) => {
+            activeDate = dateStr;
+            const entry = leaveData[dateStr] || { status: '', reason: '' };
+            activeStatus = entry.status;
+            document.getElementById('modalDateTitle').innerText = dateStr;
+            document.getElementById('modalReason').value = entry.reason || '';
+            document.getElementById('editModal').classList.remove('hidden');
+            updateModalButtons();
+        };
+
+        window.closeModal = () => document.getElementById('editModal').classList.add('hidden');
+        window.setModalStatus = (s) => { activeStatus = s; updateModalButtons(); };
+
+        function updateModalButtons() {
+            const ids = { '': 'btnNone', 'am': 'btnAm', 'pm': 'btnPm', 'full': 'btnFull' };
+            Object.values(ids).forEach(id => document.getElementById(id).className = 'px-2 py-2 text-xs border rounded-lg hover:bg-slate-50');
+            if (ids[activeStatus]) document.getElementById(ids[activeStatus]).className = 'px-2 py-2 text-xs border rounded-lg bg-red-500 text-white border-red-600';
+        }
+
+        window.saveModal = async () => {
+            const reason = document.getElementById('modalReason').value.trim();
+            const newRecords = { ...leaveData };
+            if (!activeStatus) delete newRecords[activeDate];
+            else newRecords[activeDate] = { status: activeStatus, reason: reason };
+            await saveToCloud(newRecords);
+            closeModal();
+            showToast('雲端儲存成功');
+        };
+
+        window.quickReason = (t) => document.getElementById('modalReason').value = t;
+        window.changeMonth = (d) => { currentDate.setMonth(currentDate.getMonth() + d); renderCalendar(); };
+        window.copyToClipboard = () => {
+            const sorted = Object.keys(leaveData).sort();
+            let text = "真紅請假紀錄匯總\n";
+            sorted.forEach(d => text += `[${d}] ${leaveData[d].status} - ${leaveData[d].reason || '無理由'}\n`);
+            const el = document.createElement('textarea'); el.value = text; document.body.appendChild(el); el.select(); document.execCommand('copy'); document.body.removeChild(el);
+            showToast('已複製紀錄');
+        };
+
+        window.onload = () => { initAuth(); renderAll(); };
+    </script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
+        body { font-family: 'Noto Sans TC', sans-serif; }
+        .leave-am { background: linear-gradient(to bottom right, #fee2e2 50%, transparent 50%); }
+        .leave-pm { background: linear-gradient(to top left, #fecaca 50%, transparent 50%); }
+        .leave-full { background-color: #ef4444 !important; color: white !important; color: white !important; }
+        .modal-overlay { background-color: rgba(0,0,0,0.5); backdrop-filter: blur(2px); }
+    </style>
+</head>
+<body class="bg-slate-50 min-h-screen p-4 md:p-8">
+    <div class="max-w-6xl mx-auto">
+        <header class="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-6">
+            <div>
+                <h1 class="text-3xl font-bold text-slate-800 tracking-tight">真紅請假紀錄</h1>
+                <p id="userIdDisplay" class="text-xs text-slate-400 italic mt-1">正在連線至雲端資料庫...</p>
+            </div>
+            <div class="flex items-center gap-3">
+                <button onclick="copyToClipboard()" class="bg-white border border-slate-200 text-slate-700 px-6 py-2.5 rounded-xl text-sm hover:bg-slate-50 transition shadow-sm font-bold">複製完整紀錄</button>
+            </div>
+        </header>
+
+        <!-- 上方概覽區 -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+            <div class="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-center">
+                <p class="text-slate-400 text-xs font-bold uppercase mb-1 tracking-widest">已請假總天數</p>
+                <div class="flex items-baseline gap-1">
+                    <span id="totalUsed" class="text-5xl font-black text-slate-800">0</span>
+                    <span class="text-slate-400 text-sm font-bold">DAYS</span>
+                </div>
+            </div>
+            
+            <div class="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-center md:col-span-2">
+                <div class="flex justify-between items-center mb-3">
+                    <p class="text-slate-400 text-xs font-bold uppercase tracking-widest">年度消耗進度 (以 30 天為基準)</p>
+                    <span id="usageText" class="text-lg font-black text-slate-800">0%</span>
+                </div>
+                <div class="w-full bg-slate-100 h-5 rounded-full overflow-hidden p-1">
+                    <div id="usageBar" class="bg-red-500 h-full transition-all duration-1000 rounded-full" style="width: 0%"></div>
+                </div>
+            </div>
+        </div>
+
+        <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
+            <!-- 左側：月曆與細節統計 -->
+            <div class="lg:col-span-2 space-y-8">
+                <div class="bg-white rounded-3xl shadow-sm border border-slate-100 p-8">
+                    <div class="flex items-center justify-between mb-8">
+                        <h2 id="currentMonthYear" class="text-2xl font-black text-slate-800">載入中...</h2>
+                        <div class="flex bg-slate-100 p-1 rounded-xl">
+                            <button onclick="changeMonth(-1)" class="p-2 hover:bg-white hover:shadow-sm rounded-lg transition text-slate-600">←</button>
+                            <button onclick="changeMonth(1)" class="p-2 hover:bg-white hover:shadow-sm rounded-lg transition text-slate-600">→</button>
+                        </div>
+                    </div>
+                    <div class="grid grid-cols-7 gap-3 text-center font-black text-slate-300 text-[10px] mb-4 uppercase tracking-widest">
+                        <div>SUN</div><div>MON</div><div>TUE</div><div>WED</div><div>THU</div><div>FRI</div><div>SAT</div>
+                    </div>
+                    <div id="calendarDays" class="grid grid-cols-7 gap-3"></div>
+                    
+                    <div class="mt-10 flex flex-wrap gap-6 text-[10px] font-bold text-slate-400 border-t border-slate-50 pt-6 uppercase tracking-wider">
+                        <div class="flex items-center gap-2"><div class="w-4 h-4 rounded-md leave-am border border-slate-100"></div> 上午 AM</div>
+                        <div class="flex items-center gap-2"><div class="w-4 h-4 rounded-md leave-pm border border-slate-100"></div> 下午 PM</div>
+                        <div class="flex items-center gap-2"><div class="w-4 h-4 rounded-md bg-red-500 shadow-sm shadow-red-200"></div> 全天 FULL</div>
+                        <div class="flex items-center gap-2"><div class="w-2 h-2 bg-red-400 rounded-full animate-pulse"></div> 有理由備註</div>
+                    </div>
+                </div>
+
+                <!-- 假別細節統計 -->
+                <div class="bg-white rounded-3xl shadow-sm border border-slate-100 p-8">
+                    <h3 class="text-xl font-black text-slate-800 mb-6 flex items-center gap-2">
+                        <span class="w-2 h-6 bg-red-500 rounded-full"></span> 假別明細統計
+                    </h3>
+                    <div class="grid grid-cols-1 md:grid-cols-3 gap-8 items-center">
+                        <div class="relative w-32 h-32 mx-auto">
+                            <canvas id="leaveChart"></canvas>
+                            <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                                <span class="text-[10px] font-bold text-slate-400 uppercase">比例</span>
+                                <span class="text-lg font-black text-slate-800">PRO</span>
+                            </div>
+                        </div>
+                        <div class="space-y-4 md:col-span-2 grid grid-cols-2 gap-4">
+                            <div class="bg-slate-50 p-5 rounded-2xl border border-slate-100">
+                                <p class="text-[10px] font-bold text-slate-400 uppercase mb-1">全天請假</p>
+                                <p class="text-2xl font-black text-slate-800"><span id="statFull">0</span> 次</p>
+                            </div>
+                            <div class="bg-slate-50 p-5 rounded-2xl border border-slate-100">
+                                <p class="text-[10px] font-bold text-slate-400 uppercase mb-1">半天請假</p>
+                                <p class="text-2xl font-black text-slate-800"><span id="statHalf">0</span> 次</p>
+                            </div>
+                            <div class="bg-red-50 p-5 rounded-2xl border border-red-100 col-span-2">
+                                <p class="text-[10px] font-bold text-red-400 uppercase mb-1">本月累積天數</p>
+                                <p class="text-3xl font-black text-red-600"><span id="statThisMonth">0</span> 天</p>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 右側：藉口與排行 -->
+            <div class="space-y-6">
+                <div class="bg-white rounded-3xl p-8 border border-slate-100 shadow-sm transition hover:shadow-md">
+                    <h3 class="font-black mb-6 text-slate-800 flex items-center gap-2">
+                        <span class="text-red-500 text-lg">💬</span> 近期藉口清單
+                    </h3>
+                    <div id="recentReasons" class="space-y-4"></div>
+                </div>
+                <div class="bg-white rounded-3xl p-8 border border-slate-100 shadow-sm transition hover:shadow-md">
+                    <h3 class="font-black mb-6 text-slate-800 flex items-center gap-2">
+                        <span class="text-red-500 text-lg">🏆</span> 藉口排行
+                    </h3>
+                    <div id="reasonRanking" class="space-y-4"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 編輯彈窗 -->
+    <div id="editModal" class="hidden fixed inset-0 modal-overlay flex items-center justify-center z-50 p-4">
+        <div class="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden transform transition-all">
+            <div class="p-8 border-b border-slate-50 flex justify-between items-center">
+                <h3 id="modalDateTitle" class="text-2xl font-black text-slate-800"></h3>
+                <button onclick="closeModal()" class="text-slate-300 hover:text-slate-600 transition text-xl">✕</button>
+            </div>
+            <div class="p-8 space-y-6">
+                <div>
+                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">選擇請假時段</p>
+                    <div class="grid grid-cols-4 gap-2">
+                        <button onclick="setModalStatus('')" id="btnNone" class="p-3 text-xs font-bold border rounded-2xl transition">清除</button>
+                        <button onclick="setModalStatus('am')" id="btnAm" class="p-3 text-xs font-bold border rounded-2xl transition">上午</button>
+                        <button onclick="setModalStatus('pm')" id="btnPm" class="p-3 text-xs font-bold border rounded-2xl transition">下午</button>
+                        <button onclick="setModalStatus('full')" id="btnFull" class="p-3 text-xs font-bold border rounded-2xl transition">全天</button>
+                    </div>
+                </div>
+                <div>
+                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">記錄理由</p>
+                    <textarea id="modalReason" rows="3" class="w-full border border-slate-100 rounded-2xl p-4 text-sm outline-none focus:ring-4 focus:ring-red-50 transition" placeholder="請輸入請假原因..."></textarea>
+                    <div class="flex flex-wrap gap-2 mt-3">
+                        <button onclick="quickReason('睡過頭')" class="text-[10px] font-bold bg-slate-50 text-slate-500 px-3 py-1.5 rounded-full hover:bg-slate-100 transition border border-slate-100">睡過頭</button>
+                        <button onclick="quickReason('身體不適')" class="text-[10px] font-bold bg-slate-50 text-slate-500 px-3 py-1.5 rounded-full hover:bg-slate-100 transition border border-slate-100">身體不適</button>
+                        <button onclick="quickReason('家裡有事')" class="text-[10px] font-bold bg-slate-50 text-slate-500 px-3 py-1.5 rounded-full hover:bg-slate-100 transition border border-slate-100">家裡有事</button>
+                        <button onclick="quickReason('出國旅遊')" class="text-[10px] font-bold bg-slate-50 text-slate-500 px-3 py-1.5 rounded-full hover:bg-slate-100 transition border border-slate-100">出國旅遊</button>
+                    </div>
+                </div>
+            </div>
+            <div class="p-8 bg-slate-50 flex gap-4">
+                <button onclick="closeModal()" class="flex-1 p-4 text-sm font-bold bg-white text-slate-500 rounded-2xl hover:bg-slate-100 transition border border-slate-200">取消</button>
+                <button onclick="saveModal()" class="flex-1 p-4 text-sm font-black bg-red-600 text-white rounded-2xl hover:bg-red-700 transition shadow-lg shadow-red-200">儲存變動</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="toast" class="fixed bottom-8 left-1/2 -translate-x-1/2 bg-slate-800 text-white px-8 py-4 rounded-2xl shadow-xl transform translate-y-20 opacity-0 transition-all duration-300 pointer-events-none z-[100] font-bold text-sm"></div>
+</body>
+</html>
