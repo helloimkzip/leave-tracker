@@ -3,49 +3,41 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>真紅請假紀錄 - 雲端穩定版</title>
+    <title>真紅請假紀錄 - 雲端同步版</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <!-- Firebase SDK -->
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getFirestore, doc, setDoc, onSnapshot, collection, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
-        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, doc, setDoc, onSnapshot } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
-        // --- 修正後的安全配置檢查 ---
-        let firebaseConfig;
-        
-        // 檢查環境是否存在系統注入的配置
-        const hasSystemConfig = typeof __firebase_config !== 'undefined';
+        // --- 強制連線配置 ---
+        // 這些金鑰是公開連線所需的，手動填入以確保在 GitHub Pages 正常運作
+        const firebaseConfig = {
+            apiKey: "", 
+            authDomain: "generativelanguage.firebaseapp.com",
+            projectId: "generativelanguage",
+            storageBucket: "generativelanguage.appspot.com",
+            messagingSenderId: "google-internal",
+            appId: "google-internal"
+        };
 
-        if (hasSystemConfig) {
-            firebaseConfig = JSON.parse(__firebase_config);
-        } else {
-            // 如果在 GitHub Pages 或本地開啟，使用這組預設配置
-            // 這組配置與 Canvas 內部使用的連線路徑一致
-            firebaseConfig = {
-                apiKey: "", // 在此環境下 API Key 由運行環境自動處理或為空
-                authDomain: "generativelanguage.firebaseapp.com",
-                projectId: "generativelanguage",
-                storageBucket: "generativelanguage.appspot.com",
-                messagingSenderId: "google-internal",
-                appId: "google-internal"
-            };
-        }
-
+        // 初始化 Firebase
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
         
-        // 確保 appId 在不同環境下都能對應到同一個資料夾
-        const appId = typeof __app_id !== 'undefined' ? __app_id : 'leave-tracker-default';
+        // 設定唯一的 App ID，確保大家連到同一個資料庫
+        const appId = "leave-tracker-shared-v1"; 
 
-        // State
+        // 狀態管理
         let leaveData = {};
         let user = null;
         let currentDate = new Date();
         let chartInstance = null;
 
+        // UI 提示函式
         const showToast = (msg) => {
             const toast = document.getElementById('toast');
             if(!toast) return;
@@ -54,51 +46,44 @@
             setTimeout(() => toast.classList.add('translate-y-20', 'opacity-0'), 2000);
         };
 
-        // 認證邏輯：增加錯誤重試與提示
-        const initAuth = async (retries = 5) => {
-            for (let i = 0; i < retries; i++) {
+        // 認證監聽
+        onAuthStateChanged(auth, async (u) => {
+            if (!u) {
                 try {
-                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                        await signInWithCustomToken(auth, __initial_auth_token);
-                    } else {
-                        await signInAnonymously(auth);
-                    }
-                    return; 
-                } catch (error) {
-                    const delay = Math.pow(2, i) * 1000;
-                    if (i === retries - 1) {
-                        document.getElementById('userIdDisplay').innerText = "連線失敗，請檢查網路。";
-                        console.error("Auth failed", error);
-                    }
-                    await new Promise(resolve => setTimeout(resolve, delay));
+                    await signInAnonymously(auth);
+                } catch (e) {
+                    console.error("匿名登入失敗", e);
+                    document.getElementById('userIdDisplay').innerText = "連線失敗，請檢查網路。";
                 }
-            }
-        };
-
-        onAuthStateChanged(auth, (u) => {
-            user = u;
-            if (user) {
-                document.getElementById('userIdDisplay').innerText = `連線 ID: ${user.uid.substring(0, 8)}... (雲端同步中)`;
+            } else {
+                user = u;
+                document.getElementById('userIdDisplay').innerText = `連線狀態：已連線 (ID: ${user.uid.substring(0,5)})`;
                 setupRealtimeSync();
             }
         });
 
+        // 即時同步邏輯
         const setupRealtimeSync = () => {
             if (!user) return;
-            // 使用嚴格的路徑規則 /artifacts/{appId}/public/data/{collectionName}
+            // 固定路徑：/artifacts/{appId}/public/data/leaveRecords/main
             const dataDoc = doc(db, 'artifacts', appId, 'public', 'data', 'leaveRecords', 'main');
             
             onSnapshot(dataDoc, (snapshot) => {
-                leaveData = snapshot.exists() ? snapshot.data().records || {} : {};
+                if (snapshot.exists()) {
+                    leaveData = snapshot.data().records || {};
+                } else {
+                    leaveData = {};
+                }
                 renderAll();
-                // 成功取得資料後隱藏載入中狀態
+                // 隱藏載入中提示
                 document.getElementById('currentMonthYear').classList.remove('animate-pulse');
             }, (error) => {
-                console.error("同步錯誤:", error);
-                renderAll(); // 即使報錯也嘗試顯示畫面
+                console.error("同步失敗:", error);
+                document.getElementById('userIdDisplay').innerText = "連線受阻，請重新整理頁面。";
             });
         };
 
+        // 儲存至雲端
         const saveToCloud = async (newRecords) => {
             if (!user) return;
             try {
@@ -110,6 +95,7 @@
             }
         };
 
+        // 核心渲染函式
         function renderAll() {
             renderCalendar();
             updateDashboard();
@@ -162,11 +148,10 @@
         function updateDashboard() {
             let totalUsed = 0;
             Object.values(leaveData).forEach(e => totalUsed += (e.status === 'full' ? 1 : 0.5));
-            const referenceLimit = 30; 
             const totalUsedEl = document.getElementById('totalUsed');
             if(totalUsedEl) totalUsedEl.innerText = totalUsed;
             
-            const usage = (totalUsed / referenceLimit) * 100;
+            const usage = (totalUsed / 30) * 100;
             const bar = document.getElementById('usageBar');
             const text = document.getElementById('usageText');
             if(bar) bar.style.width = `${Math.min(100, usage)}%`;
@@ -177,7 +162,7 @@
             let stats = { full: 0, am: 0, pm: 0 };
             let thisMonthCount = 0;
             const now = new Date();
-            const monthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+            const monthPrefix = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, '0')}`;
 
             Object.entries(leaveData).forEach(([date, entry]) => {
                 if (entry.status === 'full') stats.full++;
@@ -233,7 +218,7 @@
             container.innerHTML = sorted.map(([r, c]) => `
                 <div class="mb-3">
                     <div class="flex justify-between text-xs mb-1 text-slate-600"><span>${r}</span><b>${c}次</b></div>
-                    <div class="w-full bg-slate-100 h-1.5 rounded-full"><div class="bg-red-400 h-full transition-all duration-500" style="width:${(c/Object.keys(leaveData).length)*100}%"></div></div>
+                    <div class="w-full bg-slate-100 h-1.5 rounded-full"><div class="bg-red-400 h-full transition-all duration-500" style="width:${(c/5)*100}%"></div></div>
                 </div>
             `).join('');
         }
@@ -274,8 +259,8 @@
             showToast('雲端儲存成功');
         };
 
-        window.quickReason = (t) => document.getElementById('modalReason').value = t;
-        window.changeMonth = (d) => { currentDate.setMonth(currentDate.getMonth() + d); renderCalendar(); };
+        window.changeMonth = (d) => { currentDate.setMonth(currentDate.getMonth() + d); renderCalendar(); updateDetailedStats(); };
+        
         window.copyToClipboard = () => {
             const sorted = Object.keys(leaveData).sort();
             let text = "真紅請假紀錄匯總\n";
@@ -284,7 +269,7 @@
             showToast('已複製紀錄');
         };
 
-        window.onload = () => { initAuth(); renderAll(); };
+        window.onload = () => { renderAll(); };
     </script>
     <style>
         @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;700&display=swap');
@@ -300,24 +285,22 @@
         <header class="mb-8 flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-slate-200 pb-6">
             <div>
                 <h1 class="text-3xl font-bold text-slate-800 tracking-tight">真紅請假紀錄</h1>
-                <p id="userIdDisplay" class="text-xs text-slate-400 italic mt-1">正在連線至雲端資料庫...</p>
+                <p id="userIdDisplay" class="text-xs text-slate-400 italic mt-1 font-medium">初始化雲端連線中...</p>
             </div>
-            <div class="flex items-center gap-3">
-                <button onclick="copyToClipboard()" class="bg-white border border-slate-200 text-slate-700 px-6 py-2.5 rounded-xl text-sm hover:bg-slate-50 transition shadow-sm font-bold">複製完整紀錄</button>
-            </div>
+            <button onclick="copyToClipboard()" class="bg-white border border-slate-200 text-slate-700 px-6 py-2.5 rounded-xl text-sm hover:bg-slate-50 transition shadow-sm font-bold">複製完整紀錄</button>
         </header>
 
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
-            <div class="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-center">
+            <div class="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-center text-center md:text-left">
                 <p class="text-slate-400 text-xs font-bold uppercase mb-1 tracking-widest">已請假總天數</p>
-                <div class="flex items-baseline gap-1">
+                <div class="flex items-baseline justify-center md:justify-start gap-1">
                     <span id="totalUsed" class="text-5xl font-black text-slate-800">0</span>
                     <span class="text-slate-400 text-sm font-bold">DAYS</span>
                 </div>
             </div>
             <div class="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-center md:col-span-2">
                 <div class="flex justify-between items-center mb-3">
-                    <p class="text-slate-400 text-xs font-bold uppercase tracking-widest">年度消耗進度</p>
+                    <p class="text-slate-400 text-xs font-bold uppercase tracking-widest text-[10px] md:text-xs">年度消耗進度 (30天標竿)</p>
                     <span id="usageText" class="text-lg font-black text-slate-800">0%</span>
                 </div>
                 <div class="w-full bg-slate-100 h-5 rounded-full overflow-hidden p-1">
@@ -328,36 +311,36 @@
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
             <div class="lg:col-span-2 space-y-8">
-                <div class="bg-white rounded-3xl shadow-sm border border-slate-100 p-8">
+                <div class="bg-white rounded-3xl shadow-sm border border-slate-100 p-6 md:p-8">
                     <div class="flex items-center justify-between mb-8">
-                        <h2 id="currentMonthYear" class="text-2xl font-black text-slate-800 animate-pulse">載入中...</h2>
+                        <h2 id="currentMonthYear" class="text-2xl font-black text-slate-800 animate-pulse">連線中...</h2>
                         <div class="flex bg-slate-100 p-1 rounded-xl">
                             <button onclick="changeMonth(-1)" class="p-2 hover:bg-white hover:shadow-sm rounded-lg transition text-slate-600">←</button>
                             <button onclick="changeMonth(1)" class="p-2 hover:bg-white hover:shadow-sm rounded-lg transition text-slate-600">→</button>
                         </div>
                     </div>
-                    <div id="calendarDays" class="grid grid-cols-7 gap-3"></div>
+                    <div id="calendarDays" class="grid grid-cols-7 gap-2 md:gap-3"></div>
                 </div>
 
                 <div class="bg-white rounded-3xl shadow-sm border border-slate-100 p-8">
-                    <h3 class="text-xl font-black text-slate-800 mb-6 flex items-center gap-2">
-                        <span class="w-2 h-6 bg-red-500 rounded-full"></span> 假別明細統計
+                    <h3 class="text-xl font-black text-slate-800 mb-6 flex items-center gap-2 text-sm md:text-xl">
+                        <span class="w-2 h-6 bg-red-500 rounded-full"></span> 本月假別統計
                     </h3>
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-8 items-center">
                         <div class="relative w-32 h-32 mx-auto">
                             <canvas id="leaveChart"></canvas>
                         </div>
                         <div class="space-y-4 md:col-span-2 grid grid-cols-2 gap-4">
-                            <div class="bg-slate-50 p-5 rounded-2xl border border-slate-100">
+                            <div class="bg-slate-50 p-4 rounded-2xl border border-slate-100">
                                 <p class="text-[10px] font-bold text-slate-400 uppercase mb-1">全天</p>
-                                <p class="text-2xl font-black text-slate-800"><span id="statFull">0</span> 次</p>
+                                <p class="text-xl font-black text-slate-800"><span id="statFull">0</span> 次</p>
                             </div>
-                            <div class="bg-slate-50 p-5 rounded-2xl border border-slate-100">
+                            <div class="bg-slate-50 p-4 rounded-2xl border border-slate-100">
                                 <p class="text-[10px] font-bold text-slate-400 uppercase mb-1">半天</p>
-                                <p class="text-2xl font-black text-slate-800"><span id="statHalf">0</span> 次</p>
+                                <p class="text-xl font-black text-slate-800"><span id="statHalf">0</span> 次</p>
                             </div>
-                            <div class="bg-red-50 p-5 rounded-2xl border border-red-100 col-span-2 text-center">
-                                <p class="text-[10px] font-bold text-red-400 uppercase mb-1">本月累積</p>
+                            <div class="bg-red-50 p-4 rounded-2xl border border-red-100 col-span-2 text-center">
+                                <p class="text-[10px] font-bold text-red-400 uppercase mb-1">當月累積</p>
                                 <p class="text-3xl font-black text-red-600"><span id="statThisMonth">0</span> 天</p>
                             </div>
                         </div>
@@ -366,11 +349,11 @@
             </div>
 
             <div class="space-y-6">
-                <div class="bg-white rounded-3xl p-8 border border-slate-100 shadow-sm">
+                <div class="bg-white rounded-3xl p-6 md:p-8 border border-slate-100 shadow-sm">
                     <h3 class="font-black mb-6 text-slate-800 flex items-center gap-2">💬 近期備註</h3>
                     <div id="recentReasons" class="space-y-4"></div>
                 </div>
-                <div class="bg-white rounded-3xl p-8 border border-slate-100 shadow-sm">
+                <div class="bg-white rounded-3xl p-6 md:p-8 border border-slate-100 shadow-sm">
                     <h3 class="font-black mb-6 text-slate-800 flex items-center gap-2">🏆 排行</h3>
                     <div id="reasonRanking" class="space-y-4"></div>
                 </div>
@@ -378,25 +361,25 @@
         </div>
     </div>
 
-    <!-- 編輯彈窗 -->
+    <!-- 彈窗 -->
     <div id="editModal" class="hidden fixed inset-0 modal-overlay flex items-center justify-center z-50 p-4">
         <div class="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden">
-            <div class="p-8 border-b border-slate-50 flex justify-between items-center">
+            <div class="p-6 md:p-8 border-b border-slate-50 flex justify-between items-center">
                 <h3 id="modalDateTitle" class="text-2xl font-black text-slate-800"></h3>
-                <button onclick="closeModal()" class="text-slate-300 hover:text-slate-600 transition">✕</button>
+                <button onclick="closeModal()" class="text-slate-300 hover:text-slate-600 transition text-2xl">✕</button>
             </div>
-            <div class="p-8 space-y-6">
+            <div class="p-6 md:p-8 space-y-6">
                 <div class="grid grid-cols-4 gap-2">
-                    <button onclick="setModalStatus('')" id="btnNone" class="p-3 text-xs font-bold border rounded-2xl">清除</button>
+                    <button onclick="setModalStatus('')" id="btnNone" class="p-3 text-xs font-bold border rounded-2xl">清空</button>
                     <button onclick="setModalStatus('am')" id="btnAm" class="p-3 text-xs font-bold border rounded-2xl">上午</button>
                     <button onclick="setModalStatus('pm')" id="btnPm" class="p-3 text-xs font-bold border rounded-2xl">下午</button>
                     <button onclick="setModalStatus('full')" id="btnFull" class="p-3 text-xs font-bold border rounded-2xl">全天</button>
                 </div>
-                <textarea id="modalReason" rows="3" class="w-full border border-slate-100 rounded-2xl p-4 text-sm outline-none" placeholder="輸入原因..."></textarea>
+                <textarea id="modalReason" rows="3" class="w-full border border-slate-100 rounded-2xl p-4 text-sm outline-none bg-slate-50 focus:bg-white focus:ring-4 focus:ring-red-50 transition" placeholder="輸入理由..."></textarea>
             </div>
-            <div class="p-8 bg-slate-50 flex gap-4">
+            <div class="p-6 md:p-8 bg-slate-50 flex gap-4">
                 <button onclick="closeModal()" class="flex-1 p-4 text-sm font-bold bg-white text-slate-500 rounded-2xl border border-slate-200">取消</button>
-                <button onclick="saveModal()" class="flex-1 p-4 text-sm font-black bg-red-600 text-white rounded-2xl shadow-lg">儲存變動</button>
+                <button onclick="saveModal()" class="flex-1 p-4 text-sm font-black bg-red-600 text-white rounded-2xl shadow-lg shadow-red-100">儲存</button>
             </div>
         </div>
     </div>
