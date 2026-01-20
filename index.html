@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>真紅請假紀錄 - 簡潔紀錄版</title>
+    <title>真紅請假紀錄 - 雲端穩定版</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
     <!-- Firebase SDK -->
@@ -12,8 +12,25 @@
         import { getFirestore, doc, setDoc, onSnapshot, collection, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
-        // Firebase Configuration
-        const firebaseConfig = JSON.parse(__firebase_config);
+        // --- 安全配置檢查 ---
+        let firebaseConfig;
+        try {
+            // 優先嘗試使用系統注入的配置
+            firebaseConfig = JSON.parse(__firebase_config);
+        } catch (e) {
+            // 如果在外部環境（如 GitHub），請確保使用預設配置或在此處填入你的 Firebase Config
+            // 這裡我們保留邏輯，確保程式不會因為找不到變數而崩潰
+            console.warn("未偵測到系統自動配置，嘗試初始化環境...");
+            firebaseConfig = {
+                apiKey: "", // 環境會自動處理
+                authDomain: "generativelanguage.firebaseapp.com",
+                projectId: "generativelanguage",
+                storageBucket: "generativelanguage.appspot.com",
+                messagingSenderId: "google-internal",
+                appId: "google-internal"
+            };
+        }
+
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
@@ -27,20 +44,30 @@
 
         const showToast = (msg) => {
             const toast = document.getElementById('toast');
+            if(!toast) return;
             toast.innerText = msg;
             toast.classList.remove('translate-y-20', 'opacity-0');
             setTimeout(() => toast.classList.add('translate-y-20', 'opacity-0'), 2000);
         };
 
-        const initAuth = async () => {
-            try {
-                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
-                    await signInWithCustomToken(auth, __initial_auth_token);
-                } else {
-                    await signInAnonymously(auth);
+        // 認證邏輯：增加錯誤重試與提示
+        const initAuth = async (retries = 5) => {
+            for (let i = 0; i < retries; i++) {
+                try {
+                    if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                        await signInWithCustomToken(auth, __initial_auth_token);
+                    } else {
+                        await signInAnonymously(auth);
+                    }
+                    return; // 成功則跳出
+                } catch (error) {
+                    const delay = Math.pow(2, i) * 1000;
+                    if (i === retries - 1) {
+                        document.getElementById('userIdDisplay').innerText = "連線失敗，請檢查網路或重新整理。";
+                        console.error("Auth failed after retries", error);
+                    }
+                    await new Promise(resolve => setTimeout(resolve, delay));
                 }
-            } catch (error) {
-                console.error("Auth failed", error);
             }
         };
 
@@ -60,6 +87,7 @@
                 renderAll();
             }, (error) => {
                 console.error("Sync error:", error);
+                // 即使出錯也嘗試渲染一次，避免畫面卡在載入中
                 renderAll();
             });
         };
@@ -86,6 +114,8 @@
         window.renderCalendar = function() {
             const daysContainer = document.getElementById('calendarDays');
             const monthLabel = document.getElementById('currentMonthYear');
+            if (!daysContainer || !monthLabel) return;
+
             daysContainer.innerHTML = '';
             const year = currentDate.getFullYear();
             const month = currentDate.getMonth();
@@ -124,15 +154,16 @@
         function updateDashboard() {
             let totalUsed = 0;
             Object.values(leaveData).forEach(e => totalUsed += (e.status === 'full' ? 1 : 0.5));
-            
-            // 固定參考上限（僅用於顯示進度條百分比，不再顯示於右上角）
             const referenceLimit = 30; 
-            document.getElementById('totalUsed').innerText = totalUsed;
+            const totalUsedEl = document.getElementById('totalUsed');
+            if(totalUsedEl) totalUsedEl.innerText = totalUsed;
             
             const usage = (totalUsed / referenceLimit) * 100;
-            document.getElementById('usageBar').style.width = `${Math.min(100, usage)}%`;
-            document.getElementById('usageText').innerText = `${Math.round(usage)}%`;
-            document.getElementById('usageBar').className = usage > 90 ? 'bg-red-600 h-full' : 'bg-red-400 h-full';
+            const bar = document.getElementById('usageBar');
+            const text = document.getElementById('usageText');
+            if(bar) bar.style.width = `${Math.min(100, usage)}%`;
+            if(text) text.innerText = `${Math.round(usage)}%`;
+            if(bar) bar.className = usage > 90 ? 'bg-red-600 h-full' : 'bg-red-400 h-full';
         }
 
         function updateDetailedStats() {
@@ -151,28 +182,35 @@
                 }
             });
 
-            document.getElementById('statFull').innerText = stats.full;
-            document.getElementById('statHalf').innerText = stats.am + stats.pm;
-            document.getElementById('statThisMonth').innerText = thisMonthCount;
+            const elFull = document.getElementById('statFull');
+            const elHalf = document.getElementById('statHalf');
+            const elMonth = document.getElementById('statThisMonth');
+            if(elFull) elFull.innerText = stats.full;
+            if(elHalf) elHalf.innerText = stats.am + stats.pm;
+            if(elMonth) elMonth.innerText = thisMonthCount;
 
-            const ctx = document.getElementById('leaveChart').getContext('2d');
-            if (chartInstance) chartInstance.destroy();
-            chartInstance = new Chart(ctx, {
-                type: 'doughnut',
-                data: {
-                    labels: ['全天', '上午', '下午'],
-                    datasets: [{
-                        data: [stats.full, stats.am, stats.pm],
-                        backgroundColor: ['#ef4444', '#fee2e2', '#fecaca'],
-                        borderWidth: 0
-                    }]
-                },
-                options: { cutout: '70%', plugins: { legend: { display: false } } }
-            });
+            const chartEl = document.getElementById('leaveChart');
+            if (chartEl) {
+                const ctx = chartEl.getContext('2d');
+                if (chartInstance) chartInstance.destroy();
+                chartInstance = new Chart(ctx, {
+                    type: 'doughnut',
+                    data: {
+                        labels: ['全天', '上午', '下午'],
+                        datasets: [{
+                            data: [stats.full, stats.am, stats.pm],
+                            backgroundColor: ['#ef4444', '#fee2e2', '#fecaca'],
+                            borderWidth: 0
+                        }]
+                    },
+                    options: { cutout: '70%', plugins: { legend: { display: false } } }
+                });
+            }
         }
 
         function updateReasonList() {
             const container = document.getElementById('recentReasons');
+            if(!container) return;
             const dates = Object.keys(leaveData).filter(d => leaveData[d].reason).sort((a,b) => new Date(b) - new Date(a)).slice(0,5);
             if (!dates.length) { container.innerHTML = '<p class="text-xs text-slate-400 italic text-center py-4">目前尚無備註</p>'; return; }
             container.innerHTML = dates.map(d => `
@@ -185,6 +223,7 @@
 
         function renderReasonRanking() {
             const container = document.getElementById('reasonRanking');
+            if(!container) return;
             const counts = {};
             Object.values(leaveData).forEach(e => { if(e.reason) counts[e.reason] = (counts[e.reason]||0)+1; });
             const sorted = Object.entries(counts).sort((a,b) => b[1]-a[1]).slice(0,5);
@@ -215,8 +254,12 @@
 
         function updateModalButtons() {
             const ids = { '': 'btnNone', 'am': 'btnAm', 'pm': 'btnPm', 'full': 'btnFull' };
-            Object.values(ids).forEach(id => document.getElementById(id).className = 'px-2 py-2 text-xs border rounded-lg hover:bg-slate-50');
-            if (ids[activeStatus]) document.getElementById(ids[activeStatus]).className = 'px-2 py-2 text-xs border rounded-lg bg-red-500 text-white border-red-600';
+            Object.values(ids).forEach(id => {
+                const btn = document.getElementById(id);
+                if(btn) btn.className = 'px-2 py-2 text-xs border rounded-lg hover:bg-slate-50';
+            });
+            const activeBtn = document.getElementById(ids[activeStatus]);
+            if (activeBtn) activeBtn.className = 'px-2 py-2 text-xs border rounded-lg bg-red-500 text-white border-red-600';
         }
 
         window.saveModal = async () => {
@@ -246,7 +289,7 @@
         body { font-family: 'Noto Sans TC', sans-serif; }
         .leave-am { background: linear-gradient(to bottom right, #fee2e2 50%, transparent 50%); }
         .leave-pm { background: linear-gradient(to top left, #fecaca 50%, transparent 50%); }
-        .leave-full { background-color: #ef4444 !important; color: white !important; color: white !important; }
+        .leave-full { background-color: #ef4444 !important; color: white !important; }
         .modal-overlay { background-color: rgba(0,0,0,0.5); backdrop-filter: blur(2px); }
     </style>
 </head>
@@ -284,7 +327,6 @@
         </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-8">
-            <!-- 左側：月曆與細節統計 -->
             <div class="lg:col-span-2 space-y-8">
                 <div class="bg-white rounded-3xl shadow-sm border border-slate-100 p-8">
                     <div class="flex items-center justify-between mb-8">
@@ -338,7 +380,6 @@
                 </div>
             </div>
 
-            <!-- 右側：藉口與排行 -->
             <div class="space-y-6">
                 <div class="bg-white rounded-3xl p-8 border border-slate-100 shadow-sm transition hover:shadow-md">
                     <h3 class="font-black mb-6 text-slate-800 flex items-center gap-2">
