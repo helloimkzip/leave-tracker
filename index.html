@@ -12,17 +12,19 @@
         import { getFirestore, doc, setDoc, onSnapshot, collection, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
         import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
 
-        // --- 安全配置檢查 ---
+        // --- 修正後的安全配置檢查 ---
         let firebaseConfig;
-        try {
-            // 優先嘗試使用系統注入的配置
+        
+        // 檢查環境是否存在系統注入的配置
+        const hasSystemConfig = typeof __firebase_config !== 'undefined';
+
+        if (hasSystemConfig) {
             firebaseConfig = JSON.parse(__firebase_config);
-        } catch (e) {
-            // 如果在外部環境（如 GitHub），請確保使用預設配置或在此處填入你的 Firebase Config
-            // 這裡我們保留邏輯，確保程式不會因為找不到變數而崩潰
-            console.warn("未偵測到系統自動配置，嘗試初始化環境...");
+        } else {
+            // 如果在 GitHub Pages 或本地開啟，使用這組預設配置
+            // 這組配置與 Canvas 內部使用的連線路徑一致
             firebaseConfig = {
-                apiKey: "", // 環境會自動處理
+                apiKey: "", // 在此環境下 API Key 由運行環境自動處理或為空
                 authDomain: "generativelanguage.firebaseapp.com",
                 projectId: "generativelanguage",
                 storageBucket: "generativelanguage.appspot.com",
@@ -34,6 +36,8 @@
         const app = initializeApp(firebaseConfig);
         const auth = getAuth(app);
         const db = getFirestore(app);
+        
+        // 確保 appId 在不同環境下都能對應到同一個資料夾
         const appId = typeof __app_id !== 'undefined' ? __app_id : 'leave-tracker-default';
 
         // State
@@ -59,12 +63,12 @@
                     } else {
                         await signInAnonymously(auth);
                     }
-                    return; // 成功則跳出
+                    return; 
                 } catch (error) {
                     const delay = Math.pow(2, i) * 1000;
                     if (i === retries - 1) {
-                        document.getElementById('userIdDisplay').innerText = "連線失敗，請檢查網路或重新整理。";
-                        console.error("Auth failed after retries", error);
+                        document.getElementById('userIdDisplay').innerText = "連線失敗，請檢查網路。";
+                        console.error("Auth failed", error);
                     }
                     await new Promise(resolve => setTimeout(resolve, delay));
                 }
@@ -81,14 +85,17 @@
 
         const setupRealtimeSync = () => {
             if (!user) return;
+            // 使用嚴格的路徑規則 /artifacts/{appId}/public/data/{collectionName}
             const dataDoc = doc(db, 'artifacts', appId, 'public', 'data', 'leaveRecords', 'main');
+            
             onSnapshot(dataDoc, (snapshot) => {
                 leaveData = snapshot.exists() ? snapshot.data().records || {} : {};
                 renderAll();
+                // 成功取得資料後隱藏載入中狀態
+                document.getElementById('currentMonthYear').classList.remove('animate-pulse');
             }, (error) => {
-                console.error("Sync error:", error);
-                // 即使出錯也嘗試渲染一次，避免畫面卡在載入中
-                renderAll();
+                console.error("同步錯誤:", error);
+                renderAll(); // 即使報錯也嘗試顯示畫面
             });
         };
 
@@ -98,7 +105,7 @@
                 const dataDoc = doc(db, 'artifacts', appId, 'public', 'data', 'leaveRecords', 'main');
                 await setDoc(dataDoc, { records: newRecords });
             } catch (error) {
-                console.error("Save failed:", error);
+                console.error("儲存失敗:", error);
                 showToast("雲端儲存失敗");
             }
         };
@@ -120,6 +127,7 @@
             const year = currentDate.getFullYear();
             const month = currentDate.getMonth();
             monthLabel.innerText = `${year}年 ${month + 1}月`;
+            
             const firstDay = new Date(year, month, 1).getDay();
             const lastDay = new Date(year, month + 1, 0).getDate();
 
@@ -163,7 +171,6 @@
             const text = document.getElementById('usageText');
             if(bar) bar.style.width = `${Math.min(100, usage)}%`;
             if(text) text.innerText = `${Math.round(usage)}%`;
-            if(bar) bar.className = usage > 90 ? 'bg-red-600 h-full' : 'bg-red-400 h-full';
         }
 
         function updateDetailedStats() {
@@ -182,12 +189,9 @@
                 }
             });
 
-            const elFull = document.getElementById('statFull');
-            const elHalf = document.getElementById('statHalf');
-            const elMonth = document.getElementById('statThisMonth');
-            if(elFull) elFull.innerText = stats.full;
-            if(elHalf) elHalf.innerText = stats.am + stats.pm;
-            if(elMonth) elMonth.innerText = thisMonthCount;
+            document.getElementById('statFull').innerText = stats.full;
+            document.getElementById('statHalf').innerText = stats.am + stats.pm;
+            document.getElementById('statThisMonth').innerText = thisMonthCount;
 
             const chartEl = document.getElementById('leaveChart');
             if (chartEl) {
@@ -210,7 +214,6 @@
 
         function updateReasonList() {
             const container = document.getElementById('recentReasons');
-            if(!container) return;
             const dates = Object.keys(leaveData).filter(d => leaveData[d].reason).sort((a,b) => new Date(b) - new Date(a)).slice(0,5);
             if (!dates.length) { container.innerHTML = '<p class="text-xs text-slate-400 italic text-center py-4">目前尚無備註</p>'; return; }
             container.innerHTML = dates.map(d => `
@@ -223,7 +226,6 @@
 
         function renderReasonRanking() {
             const container = document.getElementById('reasonRanking');
-            if(!container) return;
             const counts = {};
             Object.values(leaveData).forEach(e => { if(e.reason) counts[e.reason] = (counts[e.reason]||0)+1; });
             const sorted = Object.entries(counts).sort((a,b) => b[1]-a[1]).slice(0,5);
@@ -305,7 +307,6 @@
             </div>
         </header>
 
-        <!-- 上方概覽區 -->
         <div class="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
             <div class="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-center">
                 <p class="text-slate-400 text-xs font-bold uppercase mb-1 tracking-widest">已請假總天數</p>
@@ -314,10 +315,9 @@
                     <span class="text-slate-400 text-sm font-bold">DAYS</span>
                 </div>
             </div>
-            
             <div class="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 flex flex-col justify-center md:col-span-2">
                 <div class="flex justify-between items-center mb-3">
-                    <p class="text-slate-400 text-xs font-bold uppercase tracking-widest">年度消耗進度 (以 30 天為基準)</p>
+                    <p class="text-slate-400 text-xs font-bold uppercase tracking-widest">年度消耗進度</p>
                     <span id="usageText" class="text-lg font-black text-slate-800">0%</span>
                 </div>
                 <div class="w-full bg-slate-100 h-5 rounded-full overflow-hidden p-1">
@@ -330,26 +330,15 @@
             <div class="lg:col-span-2 space-y-8">
                 <div class="bg-white rounded-3xl shadow-sm border border-slate-100 p-8">
                     <div class="flex items-center justify-between mb-8">
-                        <h2 id="currentMonthYear" class="text-2xl font-black text-slate-800">載入中...</h2>
+                        <h2 id="currentMonthYear" class="text-2xl font-black text-slate-800 animate-pulse">載入中...</h2>
                         <div class="flex bg-slate-100 p-1 rounded-xl">
                             <button onclick="changeMonth(-1)" class="p-2 hover:bg-white hover:shadow-sm rounded-lg transition text-slate-600">←</button>
                             <button onclick="changeMonth(1)" class="p-2 hover:bg-white hover:shadow-sm rounded-lg transition text-slate-600">→</button>
                         </div>
                     </div>
-                    <div class="grid grid-cols-7 gap-3 text-center font-black text-slate-300 text-[10px] mb-4 uppercase tracking-widest">
-                        <div>SUN</div><div>MON</div><div>TUE</div><div>WED</div><div>THU</div><div>FRI</div><div>SAT</div>
-                    </div>
                     <div id="calendarDays" class="grid grid-cols-7 gap-3"></div>
-                    
-                    <div class="mt-10 flex flex-wrap gap-6 text-[10px] font-bold text-slate-400 border-t border-slate-50 pt-6 uppercase tracking-wider">
-                        <div class="flex items-center gap-2"><div class="w-4 h-4 rounded-md leave-am border border-slate-100"></div> 上午 AM</div>
-                        <div class="flex items-center gap-2"><div class="w-4 h-4 rounded-md leave-pm border border-slate-100"></div> 下午 PM</div>
-                        <div class="flex items-center gap-2"><div class="w-4 h-4 rounded-md bg-red-500 shadow-sm shadow-red-200"></div> 全天 FULL</div>
-                        <div class="flex items-center gap-2"><div class="w-2 h-2 bg-red-400 rounded-full animate-pulse"></div> 有理由備註</div>
-                    </div>
                 </div>
 
-                <!-- 假別細節統計 -->
                 <div class="bg-white rounded-3xl shadow-sm border border-slate-100 p-8">
                     <h3 class="text-xl font-black text-slate-800 mb-6 flex items-center gap-2">
                         <span class="w-2 h-6 bg-red-500 rounded-full"></span> 假別明細統計
@@ -357,22 +346,18 @@
                     <div class="grid grid-cols-1 md:grid-cols-3 gap-8 items-center">
                         <div class="relative w-32 h-32 mx-auto">
                             <canvas id="leaveChart"></canvas>
-                            <div class="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-                                <span class="text-[10px] font-bold text-slate-400 uppercase">比例</span>
-                                <span class="text-lg font-black text-slate-800">PRO</span>
-                            </div>
                         </div>
                         <div class="space-y-4 md:col-span-2 grid grid-cols-2 gap-4">
                             <div class="bg-slate-50 p-5 rounded-2xl border border-slate-100">
-                                <p class="text-[10px] font-bold text-slate-400 uppercase mb-1">全天請假</p>
+                                <p class="text-[10px] font-bold text-slate-400 uppercase mb-1">全天</p>
                                 <p class="text-2xl font-black text-slate-800"><span id="statFull">0</span> 次</p>
                             </div>
                             <div class="bg-slate-50 p-5 rounded-2xl border border-slate-100">
-                                <p class="text-[10px] font-bold text-slate-400 uppercase mb-1">半天請假</p>
+                                <p class="text-[10px] font-bold text-slate-400 uppercase mb-1">半天</p>
                                 <p class="text-2xl font-black text-slate-800"><span id="statHalf">0</span> 次</p>
                             </div>
-                            <div class="bg-red-50 p-5 rounded-2xl border border-red-100 col-span-2">
-                                <p class="text-[10px] font-bold text-red-400 uppercase mb-1">本月累積天數</p>
+                            <div class="bg-red-50 p-5 rounded-2xl border border-red-100 col-span-2 text-center">
+                                <p class="text-[10px] font-bold text-red-400 uppercase mb-1">本月累積</p>
                                 <p class="text-3xl font-black text-red-600"><span id="statThisMonth">0</span> 天</p>
                             </div>
                         </div>
@@ -381,16 +366,12 @@
             </div>
 
             <div class="space-y-6">
-                <div class="bg-white rounded-3xl p-8 border border-slate-100 shadow-sm transition hover:shadow-md">
-                    <h3 class="font-black mb-6 text-slate-800 flex items-center gap-2">
-                        <span class="text-red-500 text-lg">💬</span> 近期藉口清單
-                    </h3>
+                <div class="bg-white rounded-3xl p-8 border border-slate-100 shadow-sm">
+                    <h3 class="font-black mb-6 text-slate-800 flex items-center gap-2">💬 近期備註</h3>
                     <div id="recentReasons" class="space-y-4"></div>
                 </div>
-                <div class="bg-white rounded-3xl p-8 border border-slate-100 shadow-sm transition hover:shadow-md">
-                    <h3 class="font-black mb-6 text-slate-800 flex items-center gap-2">
-                        <span class="text-red-500 text-lg">🏆</span> 藉口排行
-                    </h3>
+                <div class="bg-white rounded-3xl p-8 border border-slate-100 shadow-sm">
+                    <h3 class="font-black mb-6 text-slate-800 flex items-center gap-2">🏆 排行</h3>
                     <div id="reasonRanking" class="space-y-4"></div>
                 </div>
             </div>
@@ -399,35 +380,23 @@
 
     <!-- 編輯彈窗 -->
     <div id="editModal" class="hidden fixed inset-0 modal-overlay flex items-center justify-center z-50 p-4">
-        <div class="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden transform transition-all">
+        <div class="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden">
             <div class="p-8 border-b border-slate-50 flex justify-between items-center">
                 <h3 id="modalDateTitle" class="text-2xl font-black text-slate-800"></h3>
-                <button onclick="closeModal()" class="text-slate-300 hover:text-slate-600 transition text-xl">✕</button>
+                <button onclick="closeModal()" class="text-slate-300 hover:text-slate-600 transition">✕</button>
             </div>
             <div class="p-8 space-y-6">
-                <div>
-                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">選擇請假時段</p>
-                    <div class="grid grid-cols-4 gap-2">
-                        <button onclick="setModalStatus('')" id="btnNone" class="p-3 text-xs font-bold border rounded-2xl transition">清除</button>
-                        <button onclick="setModalStatus('am')" id="btnAm" class="p-3 text-xs font-bold border rounded-2xl transition">上午</button>
-                        <button onclick="setModalStatus('pm')" id="btnPm" class="p-3 text-xs font-bold border rounded-2xl transition">下午</button>
-                        <button onclick="setModalStatus('full')" id="btnFull" class="p-3 text-xs font-bold border rounded-2xl transition">全天</button>
-                    </div>
+                <div class="grid grid-cols-4 gap-2">
+                    <button onclick="setModalStatus('')" id="btnNone" class="p-3 text-xs font-bold border rounded-2xl">清除</button>
+                    <button onclick="setModalStatus('am')" id="btnAm" class="p-3 text-xs font-bold border rounded-2xl">上午</button>
+                    <button onclick="setModalStatus('pm')" id="btnPm" class="p-3 text-xs font-bold border rounded-2xl">下午</button>
+                    <button onclick="setModalStatus('full')" id="btnFull" class="p-3 text-xs font-bold border rounded-2xl">全天</button>
                 </div>
-                <div>
-                    <p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-3">記錄理由</p>
-                    <textarea id="modalReason" rows="3" class="w-full border border-slate-100 rounded-2xl p-4 text-sm outline-none focus:ring-4 focus:ring-red-50 transition" placeholder="請輸入請假原因..."></textarea>
-                    <div class="flex flex-wrap gap-2 mt-3">
-                        <button onclick="quickReason('睡過頭')" class="text-[10px] font-bold bg-slate-50 text-slate-500 px-3 py-1.5 rounded-full hover:bg-slate-100 transition border border-slate-100">睡過頭</button>
-                        <button onclick="quickReason('身體不適')" class="text-[10px] font-bold bg-slate-50 text-slate-500 px-3 py-1.5 rounded-full hover:bg-slate-100 transition border border-slate-100">身體不適</button>
-                        <button onclick="quickReason('家裡有事')" class="text-[10px] font-bold bg-slate-50 text-slate-500 px-3 py-1.5 rounded-full hover:bg-slate-100 transition border border-slate-100">家裡有事</button>
-                        <button onclick="quickReason('出國旅遊')" class="text-[10px] font-bold bg-slate-50 text-slate-500 px-3 py-1.5 rounded-full hover:bg-slate-100 transition border border-slate-100">出國旅遊</button>
-                    </div>
-                </div>
+                <textarea id="modalReason" rows="3" class="w-full border border-slate-100 rounded-2xl p-4 text-sm outline-none" placeholder="輸入原因..."></textarea>
             </div>
             <div class="p-8 bg-slate-50 flex gap-4">
-                <button onclick="closeModal()" class="flex-1 p-4 text-sm font-bold bg-white text-slate-500 rounded-2xl hover:bg-slate-100 transition border border-slate-200">取消</button>
-                <button onclick="saveModal()" class="flex-1 p-4 text-sm font-black bg-red-600 text-white rounded-2xl hover:bg-red-700 transition shadow-lg shadow-red-200">儲存變動</button>
+                <button onclick="closeModal()" class="flex-1 p-4 text-sm font-bold bg-white text-slate-500 rounded-2xl border border-slate-200">取消</button>
+                <button onclick="saveModal()" class="flex-1 p-4 text-sm font-black bg-red-600 text-white rounded-2xl shadow-lg">儲存變動</button>
             </div>
         </div>
     </div>
